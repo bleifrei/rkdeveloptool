@@ -11,7 +11,11 @@ permissions:
 
 jobs:
   linux-x86_64:
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 (LTS, x86-64 baseline), not ubuntu-latest: the newer 25.x
+    # images use a x86-64-v3 toolchain (GCC 15), whose startup objects put an
+    # "x86 ISA needed: x86-64-v3" note in the binary so it refuses to run on
+    # pre-AVX2 CPUs.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -27,23 +31,25 @@ jobs:
           ./autogen.sh
           # Makefile.am adds -Wall -Werror -Wextra; newer GCC trips on old code,
           # so keep the warnings but not as errors (CXXFLAGS comes after AM_CPPFLAGS).
-          flags='CXXFLAGS=-Wno-error CFLAGS=-Wno-error'
-          # Prefer a fully static binary (no libusb/libudev runtime deps); fall
-          # back to a dynamic build if the static libraries aren't available.
-          if ./configure $flags LDFLAGS="-static" && make -j"$(nproc)"; then
-            echo "static build"
-          else
-            make distclean || true
-            ./configure $flags
-            make -j"$(nproc)"
-          fi
+          # -O2 because passing CXXFLAGS replaces configure's default "-g -O2";
+          # -march=x86-64 keeps the binary portable (runner GCC defaults to v3).
+          ./configure CXXFLAGS="-O2 -Wno-error -march=x86-64 -mtune=generic" \
+                      CFLAGS="-O2 -Wno-error -march=x86-64 -mtune=generic"
+          make -j"$(nproc)"
           file rkdeveloptool
-          (ldd rkdeveloptool || echo "statically linked")
+          ldd rkdeveloptool || true
+          # Guard: fail if the toolchain leaked an x86-64-v3 requirement, which
+          # would make the binary refuse to run on pre-AVX2 CPUs.
+          if readelf -n rkdeveloptool | grep -q 'x86-64-v3'; then
+            echo "error: rkdeveloptool requires x86-64-v3 (wrong runner image?)" >&2
+            exit 1
+          fi
 
       - name: Package
         run: |
           ver="${GITHUB_REF_NAME:-$(git describe --tags --always)}"
           name="rkdeveloptool-${ver}-linux-x86_64"
+          strip --strip-unneeded rkdeveloptool
           mkdir -p "$name"
           cp rkdeveloptool "$name"/
           [ -f 99-rk-rockusb.rules ] && cp 99-rk-rockusb.rules "$name"/ || true
