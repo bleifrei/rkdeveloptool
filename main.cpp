@@ -54,6 +54,7 @@ void usage()
 	printf("WriteParameter:\t\tprm <parameter>\r\n");
 	printf("PrintPartition:\t\tppt \r\n");
 	printf("EraseFlash:\t\tef \r\n");
+	printf("EraseLBA:\t\tel <BeginSec> <CountSec|-1> (-1 or 0xFFFFFFFF = to end)\r\n");
 	printf("TestDevice:\t\ttd\r\n");
 	printf("ResetDevice:\t\trd [subcode]\r\n");
 	printf("ChangeStorage:\t\tcs [storage: 1=EMMC, 2=SD, 9=SPINOR]\r\n");
@@ -2726,6 +2727,79 @@ bool erase_partition(CRKUsbComm *pComm, UINT uiOffset, UINT uiSize)
 	return bSuccess;
 
 }
+/* Parse a sector number: decimal, 0x hex or 0 octal; must be non-empty,
+ * non-negative and fit in 32 bits. */
+static bool parse_sector_arg(const char *psz, UINT &uiValue)
+{
+	char *pszEnd;
+	unsigned long long ullValue;
+	while (isspace((unsigned char)*psz))
+		psz++;
+	if (*psz == '\0' || *psz == '-' || *psz == '+')
+		return false;
+	errno = 0;
+	ullValue = strtoull(psz, &pszEnd, 0);
+	if (errno || *pszEnd || ullValue > 0xFFFFFFFFULL)
+		return false;
+	uiValue = (UINT)ullValue;
+	return true;
+}
+bool erase_lba(STRUCT_RKDEVICE_DESC &dev, UINT uiBegin, UINT uiCount)
+{
+	if (!check_device_type(dev, RKUSB_LOADER | RKUSB_MASKROM))
+		return false;
+	CRKUsbComm *pComm = NULL;
+	bool bRet, bSuccess = false;
+	pComm = new CRKUsbComm(dev, g_pLogObject, bRet);
+	if (!bRet) {
+		ERROR_COLOR_ATTR;
+		printf("Creating Comm Object failed!");
+		NORMAL_COLOR_ATTR;
+		printf("\r\n");
+		delete pComm;
+		return false;
+	}
+	if (uiCount == (UINT)-1) {
+		/* erase from uiBegin to the end of the flash */
+		STRUCT_FLASHINFO_CMD info;
+		UINT uiRead = 0, uiFlashSize;
+		memset(&info, 0, sizeof(info));
+		if (pComm->RKU_ReadFlashInfo((PBYTE)&info, &uiRead) != ERR_SUCCESS) {
+			printf("Getting flash info from device failed, cannot erase to the end!\r\n");
+			delete pComm;
+			return false;
+		}
+		uiFlashSize = info.uiFlashSize;	/* raw value = total 512-byte sectors */
+		if ((uiFlashSize == 0) || (uiFlashSize == (UINT)-1)) {
+			printf("Flash size reported by device is invalid, cannot erase to the end!\r\n");
+			delete pComm;
+			return false;
+		}
+		if (uiBegin >= uiFlashSize) {
+			printf("Begin is beyond the flash size, nothing to erase!\r\n");
+			delete pComm;
+			return false;
+		}
+		uiCount = uiFlashSize - uiBegin;
+	} else {
+		if (uiCount == 0) {
+			printf("Erase count is 0, nothing to erase!\r\n");
+			delete pComm;
+			return false;
+		}
+		if (uiCount > (UINT)-1 - uiBegin) {
+			printf("Begin + Count exceeds the 32-bit sector range, please check!\r\n");
+			delete pComm;
+			return false;
+		}
+	}
+	printf("Starting to erase LBA, offset=0x%08x,count=0x%08x...\r\n", uiBegin, uiCount);
+	bSuccess = erase_partition(pComm, uiBegin, uiCount);
+	delete pComm;
+	if (bSuccess)
+		printf("Erase LBA complete.\r\n");
+	return bSuccess;
+}
 bool EatSparseChunk(FILE *file, chunk_header &chunk)
 {
 	UINT uiRead;
@@ -3245,6 +3319,18 @@ bool handle_command(int argc, char* argv[], CRKScan *pScan)
 			bSuccess = erase_flash(dev);
 		} else
 			printf("Parameter of [EF] command is invalid, please check help!\r\n");
+	} else if(strcmp(strCmd.c_str(), "EL") == 0) {//Erase LBA
+		UINT uiBegin, uiCount;
+		if (argc != 4)
+			printf("Parameter of [EL] command is invalid, please check help!\r\n");
+		else if (!parse_sector_arg(argv[2], uiBegin) || (uiBegin == (UINT)-1))
+			printf("Begin is invalid, please check!\r\n");
+		else if (strcmp(argv[3], "-1") == 0)
+			bSuccess = erase_lba(dev, uiBegin, (UINT)-1);	/* erase to the end */
+		else if (!parse_sector_arg(argv[3], uiCount))
+			printf("Count is invalid, please check!\r\n");
+		else
+			bSuccess = erase_lba(dev, uiBegin, uiCount);
 	} else if(strcmp(strCmd.c_str(), "WL") == 0) {
 		if (argc == 4) {
 			UINT uiBegin;
